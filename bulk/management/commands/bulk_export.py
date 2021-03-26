@@ -25,6 +25,7 @@ from openstates.data.models import (
     BillVersionLink,
     BillSource,
     VoteEvent,
+    Organization,
     PersonVote,
     VoteCount,
     VoteSource,
@@ -153,7 +154,7 @@ def export_session_csv(state, session):
 State: {state}
 Session: {session}
 Generated At: {ts}
-CSV Format Version: 2.0
+CSV Format Version: 2.1
 """,
     )
 
@@ -210,6 +211,9 @@ CSV Format Version: 2.0
     ):
         subobjs = Model.objects.filter(vote_event__legislative_session=sobj).values()
         export_csv(f"{state}/{session}/{state}_{session}_{fname}.csv", subobjs, zf)
+
+    orgs = Organization.objects.filter(jurisdiction_id=sobj.jurisdiction_id).values()
+    export_csv(f"{state}/{session}/{state}_{session}_organizations.csv", orgs, zf)
 
     return filename
 
@@ -283,11 +287,26 @@ def upload_and_publish(state, session, filename, data_type):
     )
 
 
-def get_available_sessions(state):
-    return sorted(
-        s.identifier
-        for s in LegislativeSession.objects.filter(jurisdiction_id=abbr_to_jid(state))
-    )
+def get_available_sessions(state, updated_since=0):
+    if updated_since:
+        sessions = [
+            b
+            for b in Bill.objects.filter(
+                legislative_session__jurisdiction_id=abbr_to_jid(state),
+                updated_at__gte=datetime.datetime.now()
+                - datetime.timedelta(days=updated_since),
+            )
+            .values_list("legislative_session__identifier", flat=True)
+            .distinct()
+        ]
+    else:
+        sessions = [
+            s.identifier
+            for s in LegislativeSession.objects.filter(
+                jurisdiction_id=abbr_to_jid(state)
+            )
+        ]
+    return sorted(sessions)
 
 
 def export_data(state, session, data_type):
@@ -299,9 +318,9 @@ def export_data(state, session, data_type):
         upload_and_publish(state, session, filename, data_type)
 
 
-def export_all_states(data_type):
+def export_all_states(data_type, updates_since):
     for state in STATES_BY_NAME.values():
-        for session in get_available_sessions(state.abbr):
+        for session in get_available_sessions(state.abbr, updates_since):
             export_data(state.abbr, session, data_type)
 
 
@@ -312,6 +331,7 @@ class Command(BaseCommand):
         parser.add_argument("state")
         parser.add_argument("sessions", nargs="*")
         parser.add_argument("--all-sessions", action="store_true")
+        parser.add_argument("--with-updates-days", type=int, default=0)  # days
         parser.add_argument("--format")
 
     def handle(self, *args, **options):
@@ -322,12 +342,17 @@ class Command(BaseCommand):
 
         # special case
         if state == "all":
-            export_all_states(data_type)
+            export_all_states(data_type, options["with_updates_days"])
             return
 
-        sessions = get_available_sessions(state)
+        sessions = get_available_sessions(state, options["with_updates_days"])
 
         if options["all_sessions"]:
+            options["sessions"] = sessions
+        elif options["with_updates_days"]:
+            print(
+                f"{len(sessions)} sessions with updates in last {options['with_updates_days']} days"
+            )
             options["sessions"] = sessions
         if not options["sessions"]:
             print("available sessions:")
